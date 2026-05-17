@@ -133,9 +133,16 @@ class VersionHistoryDialog(QDialog):
         self.proj_dir = proj_dir
         
         layout = QHBoxLayout(self)
+        left_layout = QVBoxLayout()
         self.list_widget = QListWidget()
         self.list_widget.setFixedWidth(250)
         self.list_widget.currentRowChanged.connect(self.on_select)
+        
+        self.revert_btn = QPushButton("Revert Project to Selected Change")
+        self.revert_btn.clicked.connect(self.revert_change)
+        
+        left_layout.addWidget(self.list_widget)
+        left_layout.addWidget(self.revert_btn)
         
         self.diff_view = QTextEdit()
         self.diff_view.setReadOnly(True)
@@ -143,7 +150,7 @@ class VersionHistoryDialog(QDialog):
         self.diff_view.setFont(font)
         self.diff_view.setStyleSheet("background-color: #1e1e1e; color: #d4d4d4;")
         
-        layout.addWidget(self.list_widget)
+        layout.addLayout(left_layout)
         layout.addWidget(self.diff_view)
         
         self.commits = []
@@ -178,6 +185,20 @@ class VersionHistoryDialog(QDialog):
                     html_content += f"{escaped}<br>"
             html_content += "</pre>"
             self.diff_view.setHtml(html_content)
+            
+    def revert_change(self):
+        row = self.list_widget.currentRow()
+        if row < 0 or row >= len(self.commits): return
+        commit_hash = self.commits[row][0]
+        
+        reply = QMessageBox.question(self, "Revert Project", f"Are you sure you want to revert the entire project to {commit_hash}? Uncommitted changes will be lost.", QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No)
+        if reply == QMessageBox.StandardButton.Yes:
+            try:
+                subprocess.run(["git", "reset", "--hard", commit_hash], cwd=self.proj_dir)
+                QMessageBox.information(self, "Reverted", "Project successfully reverted.\nPlease close and reopen your files to see the changes.")
+                self.accept()
+            except Exception as e:
+                QMessageBox.warning(self, "Error", f"Failed to revert: {e}")
 
 from waveform_viewer import WaveformViewer
 
@@ -191,6 +212,31 @@ class VerilogIDE(QMainWindow):
         self.load_themes()
         self.setup_ui()
         self.apply_theme("light")
+        self.load_config()
+        
+    def load_config(self):
+        self.config_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "ide_config.json")
+        if os.path.exists(self.config_path):
+            try:
+                with open(self.config_path, "r") as f:
+                    config = json.load(f)
+                    last_proj = config.get("last_project")
+                    if last_proj and os.path.exists(last_proj):
+                        self.set_project_dir(last_proj)
+            except: pass
+
+    def save_config(self, key, value):
+        config = {}
+        if hasattr(self, 'config_path') and os.path.exists(self.config_path):
+            try:
+                with open(self.config_path, "r") as f:
+                    config = json.load(f)
+            except: pass
+        config[key] = value
+        try:
+            with open(getattr(self, 'config_path', os.path.join(os.path.dirname(os.path.abspath(__file__)), "ide_config.json")), "w") as f:
+                json.dump(config, f)
+        except: pass
         
     def load_themes(self):
         self.themes = {}
@@ -280,6 +326,15 @@ class VerilogIDE(QMainWindow):
         history_act = QAction("View Change History", self)
         history_act.triggered.connect(self.show_history)
         view_menu.addAction(history_act)
+        
+        vc_menu = menubar.addMenu("Version Control")
+        commit_all_act = QAction("Commit All", self)
+        commit_all_act.triggered.connect(lambda: self.commit_changes("All"))
+        vc_menu.addAction(commit_all_act)
+        
+        commit_cur_act = QAction("Commit Current File", self)
+        commit_cur_act.triggered.connect(lambda: self.commit_changes("Current"))
+        vc_menu.addAction(commit_cur_act)
 
         # Tool Bar
         toolbar = QToolBar("Main Toolbar")
@@ -291,6 +346,9 @@ class VerilogIDE(QMainWindow):
         toolbar.addAction(redo_act)
         toolbar.addSeparator()
         toolbar.addAction(compile_act)
+        toolbar.addSeparator()
+        toolbar.addAction(commit_all_act)
+        toolbar.addAction(commit_cur_act)
 
         # Central Widget (Multi-tab Editor with Splitter)
         self.editor_splitter = QSplitter(Qt.Orientation.Horizontal)
@@ -398,6 +456,7 @@ class VerilogIDE(QMainWindow):
         self.current_project_dir = dir_path
         self.tree_view.setRootIndex(self.file_system_model.index(dir_path))
         self.console_output.appendPlainText(f"Opened project: {dir_path}")
+        self.save_config("last_project", dir_path)
         
     def load_example(self, example_folder):
         base_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "examples")
@@ -420,6 +479,21 @@ class VerilogIDE(QMainWindow):
         if self.editor_tabs_right.isHidden():
             self.editor_tabs_right.show()
             self.editor_splitter.setSizes([self.width() // 2, self.width() // 2])
+            
+            # Clone active file
+            current_editor = self.editor_tabs.currentWidget()
+            if current_editor and current_editor.property("file_path"):
+                file_path = current_editor.property("file_path")
+                try:
+                    with open(file_path, 'r') as f:
+                        content = f.read()
+                    new_editor = CodeEditor()
+                    new_editor.setPlainText(content)
+                    new_editor.setProperty("file_path", file_path)
+                    idx = self.editor_tabs_right.addTab(new_editor, os.path.basename(file_path))
+                    self.editor_tabs_right.setCurrentIndex(idx)
+                except Exception:
+                    pass
         else:
             self.editor_tabs_right.hide()
             
@@ -477,26 +551,42 @@ class VerilogIDE(QMainWindow):
                 target_tabs.setTabText(idx, os.path.basename(file_path))
                 current_editor.setProperty("file_path", file_path)
                 self.console_output.appendPlainText(f"Saved: {file_path}")
-                self.record_change(file_path)
         else:
             file_path = current_editor.property("file_path")
             if file_path:
                 with open(file_path, 'w') as f:
                     f.write(current_editor.toPlainText())
                 self.console_output.appendPlainText(f"Saved: {file_path}")
-                self.record_change(file_path)
                 
-    def record_change(self, file_path):
-        if not self.is_vc_enabled(): return
+    def commit_changes(self, choice=None):
+        if not self.is_vc_enabled():
+            QMessageBox.warning(self, "VC Disabled", "Change tracking is disabled for this project.\nYou can recreate the project with Version Control enabled.")
+            return
+            
+        if choice is None:
+            options = ["Commit Current File Only", "Commit All Changed Files"]
+            choice, ok = QInputDialog.getItem(self, "Commit Options", "Select what to commit:", options, 0, False)
+            if not (ok and choice):
+                return
         
-        # Check if there are changes
-        res = subprocess.run(["git", "status", "--porcelain", file_path], cwd=self.current_project_dir, capture_output=True, text=True)
-        if res.stdout.strip():
-            msg, ok = QInputDialog.getText(self, "Change Tracker", f"Enter a change name for {os.path.basename(file_path)}:")
-            if ok and msg.strip():
-                subprocess.run(["git", "add", file_path], cwd=self.current_project_dir)
+        msg, ok2 = QInputDialog.getText(self, "Change Tracker", f"Enter a change name for {choice}:")
+        if ok2 and msg.strip():
+            try:
+                if "All" in choice:
+                    subprocess.run(["git", "add", "."], cwd=self.current_project_dir)
+                else:
+                    target_tabs = self.last_focused_tabs if not self.editor_tabs_right.isHidden() else self.editor_tabs
+                    current_editor = target_tabs.currentWidget()
+                    if current_editor and current_editor.property("file_path"):
+                        subprocess.run(["git", "add", current_editor.property("file_path")], cwd=self.current_project_dir)
+                    else:
+                        QMessageBox.warning(self, "No file", "No valid file is currently active.")
+                        return
+                        
                 subprocess.run(["git", "commit", "-m", msg.strip()], cwd=self.current_project_dir)
-                self.console_output.appendPlainText(f"Change recorded: {msg.strip()}")
+                self.console_output.appendPlainText(f"Changes committed: {msg.strip()}")
+            except Exception as e:
+                QMessageBox.warning(self, "Git Error", f"Failed to commit. Is Git installed on your system?\n{e}")
         
     def on_tree_double_clicked(self, index):
         file_path = self.file_system_model.filePath(index)
