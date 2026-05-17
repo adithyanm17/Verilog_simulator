@@ -194,7 +194,7 @@ class VersionHistoryDialog(QDialog):
         reply = QMessageBox.question(self, "Revert Project", f"Are you sure you want to revert the entire project to {commit_hash}? Uncommitted changes will be lost.", QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No)
         if reply == QMessageBox.StandardButton.Yes:
             try:
-                subprocess.run(["git", "reset", "--hard", commit_hash], cwd=self.proj_dir)
+                subprocess.run(["git", "reset", "--hard", commit_hash], cwd=self.proj_dir, capture_output=True)
                 QMessageBox.information(self, "Reverted", "Project successfully reverted.\nPlease close and reopen your files to see the changes.")
                 self.accept()
             except Exception as e:
@@ -439,7 +439,7 @@ class VerilogIDE(QMainWindow):
                 
             if vc_enabled:
                 with open(os.path.join(proj_dir, ".gitignore"), "w") as f:
-                    f.write("sim.vcd\nsim.vvp\n__pycache__/\n")
+                    f.write("*.vcd\n*.vvp\n__pycache__/\n")
                 subprocess.run(["git", "init"], cwd=proj_dir, capture_output=True)
                 subprocess.run(["git", "add", "."], cwd=proj_dir, capture_output=True)
                 subprocess.run(["git", "commit", "-m", "Initial project creation"], cwd=proj_dir, capture_output=True)
@@ -573,17 +573,17 @@ class VerilogIDE(QMainWindow):
         if ok2 and msg.strip():
             try:
                 if "All" in choice:
-                    subprocess.run(["git", "add", "."], cwd=self.current_project_dir)
+                    subprocess.run(["git", "add", "."], cwd=self.current_project_dir, capture_output=True)
                 else:
                     target_tabs = self.last_focused_tabs if not self.editor_tabs_right.isHidden() else self.editor_tabs
                     current_editor = target_tabs.currentWidget()
                     if current_editor and current_editor.property("file_path"):
-                        subprocess.run(["git", "add", current_editor.property("file_path")], cwd=self.current_project_dir)
+                        subprocess.run(["git", "add", current_editor.property("file_path")], cwd=self.current_project_dir, capture_output=True)
                     else:
                         QMessageBox.warning(self, "No file", "No valid file is currently active.")
                         return
                         
-                subprocess.run(["git", "commit", "-m", msg.strip()], cwd=self.current_project_dir)
+                subprocess.run(["git", "commit", "-m", msg.strip()], cwd=self.current_project_dir, capture_output=True)
                 self.console_output.appendPlainText(f"Changes committed: {msg.strip()}")
             except Exception as e:
                 QMessageBox.warning(self, "Git Error", f"Failed to commit. Is Git installed on your system?\n{e}")
@@ -617,9 +617,21 @@ class VerilogIDE(QMainWindow):
 
     def close_tab(self, index):
         self.editor_tabs.removeTab(index)
+        # If left pane becomes empty but right pane is open, move right tabs to left
+        if self.editor_tabs.count() == 0 and not self.editor_tabs_right.isHidden():
+            while self.editor_tabs_right.count() > 0:
+                widget = self.editor_tabs_right.widget(0)
+                text = self.editor_tabs_right.tabText(0)
+                self.editor_tabs.addTab(widget, text)
+            self.editor_tabs_right.hide()
+            self.last_focused_tabs = self.editor_tabs
         
     def close_tab_right(self, index):
         self.editor_tabs_right.removeTab(index)
+        # Auto collapse right pane if empty
+        if self.editor_tabs_right.count() == 0:
+            self.editor_tabs_right.hide()
+            self.last_focused_tabs = self.editor_tabs
         
     def undo_edit(self):
         target_tabs = self.last_focused_tabs if not self.editor_tabs_right.isHidden() else self.editor_tabs
