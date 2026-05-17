@@ -8,8 +8,9 @@ from PyQt6.QtWidgets import (
     QTabWidget, QPlainTextEdit, QFileDialog, QDockWidget, QListWidget,
     QTreeView, QMenu, QMenuBar, QToolBar, QTextEdit,
     QPushButton, QLabel, QSplitter, QComboBox, QCheckBox, QTableWidget,
-    QTableWidgetItem, QHeaderView, QMessageBox, QGroupBox
+    QTableWidgetItem, QHeaderView, QMessageBox, QGroupBox, QDialog, QFormLayout, QDialogButtonBox, QLineEdit, QInputDialog
 )
+import html
 from PyQt6.QtGui import QAction, QKeySequence, QFont, QIcon, QColor, QPainter, QPen, QFileSystemModel, QTextFormat
 from PyQt6.QtCore import Qt, QDir, QSize, QRect
 
@@ -88,6 +89,95 @@ class CodeEditor(QPlainTextEdit):
                 main_win.last_focused_tabs = main_win.editor_tabs
             elif main_win.editor_tabs_right.indexOf(self) != -1:
                 main_win.last_focused_tabs = main_win.editor_tabs_right
+
+class NewProjectDialog(QDialog):
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("Create New Project")
+        self.resize(500, 150)
+        self.layout = QFormLayout(self)
+        
+        self.name_input = QLineEdit()
+        self.loc_input = QLineEdit()
+        self.loc_input.setText(os.getcwd())
+        
+        browse_btn = QPushButton("Browse...")
+        browse_btn.clicked.connect(self.browse)
+        
+        loc_layout = QHBoxLayout()
+        loc_layout.addWidget(self.loc_input)
+        loc_layout.addWidget(browse_btn)
+        
+        self.vc_checkbox = QCheckBox("Enable Version Control (Track Changes)")
+        self.vc_checkbox.setChecked(True)
+        
+        self.layout.addRow("Project Name:", self.name_input)
+        self.layout.addRow("Location:", loc_layout)
+        self.layout.addRow("", self.vc_checkbox)
+        
+        self.buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel)
+        self.buttons.accepted.connect(self.accept)
+        self.buttons.rejected.connect(self.reject)
+        self.layout.addRow(self.buttons)
+        
+    def browse(self):
+        dir_path = QFileDialog.getExistingDirectory(self, "Select Location")
+        if dir_path:
+            self.loc_input.setText(dir_path)
+
+class VersionHistoryDialog(QDialog):
+    def __init__(self, proj_dir, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("Change Tracker History")
+        self.resize(900, 600)
+        self.proj_dir = proj_dir
+        
+        layout = QHBoxLayout(self)
+        self.list_widget = QListWidget()
+        self.list_widget.setFixedWidth(250)
+        self.list_widget.currentRowChanged.connect(self.on_select)
+        
+        self.diff_view = QTextEdit()
+        self.diff_view.setReadOnly(True)
+        font = QFont("Consolas", 11)
+        self.diff_view.setFont(font)
+        self.diff_view.setStyleSheet("background-color: #1e1e1e; color: #d4d4d4;")
+        
+        layout.addWidget(self.list_widget)
+        layout.addWidget(self.diff_view)
+        
+        self.commits = []
+        self.load_history()
+        
+    def load_history(self):
+        res = subprocess.run(["git", "log", "--oneline"], cwd=self.proj_dir, capture_output=True, text=True)
+        if res.returncode == 0:
+            for line in res.stdout.strip().split('\n'):
+                if line:
+                    parts = line.split(' ', 1)
+                    if len(parts) == 2:
+                        self.commits.append((parts[0], parts[1]))
+                        self.list_widget.addItem(parts[1])
+                        
+    def on_select(self, row):
+        if row < 0 or row >= len(self.commits): return
+        commit_hash = self.commits[row][0]
+        res = subprocess.run(["git", "show", commit_hash], cwd=self.proj_dir, capture_output=True, text=True)
+        if res.returncode == 0:
+            diff_text = res.stdout
+            html_content = "<pre style='font-family: Consolas;'>"
+            for line in diff_text.split('\n'):
+                escaped = html.escape(line)
+                if line.startswith('+') and not line.startswith('+++'):
+                    html_content += f"<span style='color: #4CAF50;'>{escaped}</span><br>"
+                elif line.startswith('-') and not line.startswith('---'):
+                    html_content += f"<span style='color: #F44336;'>{escaped}</span><br>"
+                elif line.startswith('@@'):
+                    html_content += f"<span style='color: #2196F3;'>{escaped}</span><br>"
+                else:
+                    html_content += f"{escaped}<br>"
+            html_content += "</pre>"
+            self.diff_view.setHtml(html_content)
 
 from waveform_viewer import WaveformViewer
 
@@ -186,6 +276,10 @@ class VerilogIDE(QMainWindow):
         doc_act = QAction("Documentation (How to Code)", self)
         doc_act.triggered.connect(self.show_documentation)
         help_menu.addAction(doc_act)
+        
+        history_act = QAction("View Change History", self)
+        history_act.triggered.connect(self.show_history)
+        view_menu.addAction(history_act)
 
         # Tool Bar
         toolbar = QToolBar("Main Toolbar")
@@ -269,9 +363,31 @@ class VerilogIDE(QMainWindow):
         self.new_file() # Start with an empty file
 
     def new_project(self):
-        dir_path = QFileDialog.getExistingDirectory(self, "Select Directory for New Project")
-        if dir_path:
-            self.set_project_dir(dir_path)
+        dlg = NewProjectDialog(self)
+        if dlg.exec():
+            name = dlg.name_input.text().strip()
+            loc = dlg.loc_input.text().strip()
+            vc_enabled = dlg.vc_checkbox.isChecked()
+            
+            if not name or not loc:
+                return
+                
+            proj_dir = os.path.join(loc, name)
+            os.makedirs(proj_dir, exist_ok=True)
+            
+            proj_data = {"name": name, "vc_enabled": vc_enabled}
+            with open(os.path.join(proj_dir, "project.json"), "w") as f:
+                json.dump(proj_data, f)
+                
+            if vc_enabled:
+                with open(os.path.join(proj_dir, ".gitignore"), "w") as f:
+                    f.write("sim.vcd\nsim.vvp\n__pycache__/\n")
+                subprocess.run(["git", "init"], cwd=proj_dir, capture_output=True)
+                subprocess.run(["git", "add", "."], cwd=proj_dir, capture_output=True)
+                subprocess.run(["git", "commit", "-m", "Initial project creation"], cwd=proj_dir, capture_output=True)
+                
+            self.set_project_dir(proj_dir)
+            self.console_output.appendPlainText(f"Created new project: {name} (VC: {vc_enabled})")
             
     def open_project(self):
         dir_path = QFileDialog.getExistingDirectory(self, "Open Project Directory")
@@ -314,6 +430,26 @@ class VerilogIDE(QMainWindow):
         else:
             QMessageBox.information(self, "Help", "Documentation file 'how_to_code.txt' not found in examples folder.")
 
+    def show_history(self):
+        if not self.current_project_dir:
+            QMessageBox.warning(self, "No Project", "Please open a project first.")
+            return
+        if not self.is_vc_enabled():
+            QMessageBox.warning(self, "VC Disabled", "Change tracking is disabled for this project.")
+            return
+        dlg = VersionHistoryDialog(self.current_project_dir, self)
+        dlg.exec()
+
+    def is_vc_enabled(self):
+        if not self.current_project_dir: return False
+        try:
+            with open(os.path.join(self.current_project_dir, "project.json"), "r") as f:
+                data = json.load(f)
+                return data.get("vc_enabled", False)
+        except:
+            # Check if git exists as fallback
+            return os.path.exists(os.path.join(self.current_project_dir, ".git"))
+
     def new_file(self):
         editor = CodeEditor()
         target_tabs = self.last_focused_tabs if not self.editor_tabs_right.isHidden() else self.editor_tabs
@@ -341,12 +477,26 @@ class VerilogIDE(QMainWindow):
                 target_tabs.setTabText(idx, os.path.basename(file_path))
                 current_editor.setProperty("file_path", file_path)
                 self.console_output.appendPlainText(f"Saved: {file_path}")
+                self.record_change(file_path)
         else:
             file_path = current_editor.property("file_path")
             if file_path:
                 with open(file_path, 'w') as f:
                     f.write(current_editor.toPlainText())
                 self.console_output.appendPlainText(f"Saved: {file_path}")
+                self.record_change(file_path)
+                
+    def record_change(self, file_path):
+        if not self.is_vc_enabled(): return
+        
+        # Check if there are changes
+        res = subprocess.run(["git", "status", "--porcelain", file_path], cwd=self.current_project_dir, capture_output=True, text=True)
+        if res.stdout.strip():
+            msg, ok = QInputDialog.getText(self, "Change Tracker", f"Enter a change name for {os.path.basename(file_path)}:")
+            if ok and msg.strip():
+                subprocess.run(["git", "add", file_path], cwd=self.current_project_dir)
+                subprocess.run(["git", "commit", "-m", msg.strip()], cwd=self.current_project_dir)
+                self.console_output.appendPlainText(f"Change recorded: {msg.strip()}")
         
     def on_tree_double_clicked(self, index):
         file_path = self.file_system_model.filePath(index)
